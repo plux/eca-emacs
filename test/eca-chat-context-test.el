@@ -430,5 +430,31 @@
             (set-buffer-modified-p nil))
           (kill-buffer buf))))))
 
+(describe "eca-chat--clipboard-image-p"
+  (before-each
+    (spy-on 'display-graphic-p :and-return-value t))
+
+  (it "returns non-nil when TARGETS contains an image type"
+    (spy-on 'gui-get-selection
+            :and-return-value (vector 'TARGETS 'UTF8_STRING 'image/png))
+    (expect (eca-chat--clipboard-image-p) :to-be-truthy))
+
+  (it "returns nil when TARGETS is a vector without an image type"
+    (spy-on 'gui-get-selection
+            :and-return-value (vector 'TARGETS 'UTF8_STRING 'STRING))
+    (expect (eca-chat--clipboard-image-p) :to-be nil))
+
+  (it "returns nil without erroring when TARGETS is a bare symbol"
+    ;; Some X11 clients (e.g. st) only advertise a single selection
+    ;; target, in which case `gui-get-selection' returns a bare
+    ;; symbol instead of a vector/list of targets.
+    (spy-on 'gui-get-selection :and-return-value 'UTF8_STRING)
+    (expect (eca-chat--clipboard-image-p) :to-be nil))
+
+  (it "returns non-nil when TARGETS is a list containing an image type (default pass-through)"
+    (spy-on 'gui-get-selection
+            :and-return-value (list 'TARGETS 'UTF8_STRING 'image/png))
+    (expect (eca-chat--clipboard-image-p) :to-be-truthy)))
+
 (provide 'eca-chat-context-test)
 ;;; eca-chat-context-test.el ends here
