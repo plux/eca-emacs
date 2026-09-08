@@ -3960,6 +3960,7 @@ Append STATUS symbol.  Optional PARENT-ID for nested rendering."
   (-let* ((agent-name (plist-get args :agent))
           (task (plist-get args :task))
           (model (plist-get details :model))
+          (variant (plist-get details :variant))
           (step (plist-get details :step))
           (max-steps (plist-get details :maxSteps))
           (usage-str (eca-chat--subagent-usage-str id))
@@ -4013,6 +4014,7 @@ Append STATUS symbol.  Optional PARENT-ID for nested rendering."
        (eca-chat--content-table
         `(("Agent" . ,agent-name)
           ("Model" . ,model)
+          ,@(when variant `(("Variant" . ,variant)))
           ,@(when task `(("Task" . ,(concat task "\n\n"))))
           ,@(when output-text `(("Output" . ,(concat "\n" output-text))))))
        nil
