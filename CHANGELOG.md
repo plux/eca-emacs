@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bugfix: a tool call awaiting approval whose expanded body is taller than the window no longer gets its label and Accept/Reject buttons scrolled above the window (#308). The window is anchored on the tool call with point on its Accept button (RET accepts), and once it resolves the view moves on to the next pending approval or back to the prompt.
 - Add `eca-chat-tool-call-functions`, an abnormal hook run with the session and content when a tool call changes state, e.g. to refresh magit after file edits.
 - Show the model variant of a running subagent in the `spawn_agent` tool call details table when the server sends one.
 - Bugfix: kill commands not covered by the deletion guards (`backward-kill-sentence`, `backward-kill-sexp`, `kill-line`, `kill-region`, etc.) could cross the prompt/context markup and corrupt the chat prompt area, making RET fail with `args-out-of-range` (#305). Kills are now clamped to the prompt field (and blocked above it), the transient-area refresh skips instead of signaling on a corrupted block, and `eca-chat-clear-prompt` (`C-c C-d`) rebuilds the prompt markup when it is broken.
