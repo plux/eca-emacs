@@ -4259,36 +4259,89 @@ PARENT-TOOL-CALL-ID means content belongs to a tool block."
     (setq-local eca-chat--last-response-copy-start nil)
     (setq-local eca-chat--last-response-copy-kind 'break)))
 
+(defun eca-chat--set-task-widget (label body &optional approval-id)
+  "Show LABEL and BODY in the task area widget, creating it when needed.
+APPROVAL-ID is the tool call whose approval prompt LABEL carries, if any."
+  (if (eca-chat--get-expandable-content eca-chat--task-block-id)
+      (eca-chat--update-expandable-content eca-chat--task-block-id label body)
+    (eca-chat--add-expandable-content eca-chat--task-block-id label body nil
+                                      (overlay-start (eca-chat--task-area-ov))))
+  (overlay-put (eca-chat--get-expandable-content eca-chat--task-block-id)
+               'eca-chat--task-approval-id approval-id))
+
+(defun eca-chat--task-widget-approval-id ()
+  "Return the id of the tool call whose approval prompt the task widget shows."
+  (when-let* ((ov-label (eca-chat--get-expandable-content eca-chat--task-block-id)))
+    (overlay-get ov-label 'eca-chat--task-approval-id)))
+
+(defun eca-chat--render-task-widget (&optional loading?)
+  "Render the task area widget from `eca-chat--task-state'.
+Without tasks the widget is removed, unless LOADING? is non-nil: a
+placeholder label is then shown while a task tool call is in flight."
+  (let ((tasks (append (plist-get eca-chat--task-state :tasks) nil)))
+    (cond
+     (tasks
+      (let* ((active-summary (plist-get eca-chat--task-state :activeSummary))
+             (done-count (length (-filter (lambda (task) (string= "done" (plist-get task :status))) tasks)))
+             (total-count (length tasks))
+             (in-progress-task (-first (lambda (task) (string= "in-progress" (plist-get task :status))) tasks))
+             (label-text (or active-summary
+                             (when in-progress-task (plist-get in-progress-task :subject))
+                             ""))
+             (prefix-text (if active-summary "Task: " "Tasks "))
+             (progress-text (format " (%d/%d)" done-count total-count))
+             (label-face (if in-progress-task 'eca-chat-task-label-in-progress-face 'eca-chat-task-label-face))
+             (label (concat
+                     (propertize prefix-text 'font-lock-face 'eca-chat-task-prefix-face)
+                     (propertize label-text 'font-lock-face label-face)
+                     (propertize progress-text 'font-lock-face 'eca-chat-task-progress-face))))
+        (eca-chat--set-task-widget label (eca-chat--task-build-content tasks))))
+     (loading?
+      (eca-chat--set-task-widget
+       (concat (propertize "Creating tasks... " 'font-lock-face 'eca-chat-task-prefix-face)
+               eca-chat-mcp-tool-call-loading-symbol)
+       ""))
+     (t
+      (eca-chat--remove-expandable-content eca-chat--task-block-id)))))
+
 (defun eca-chat--update-task-state (content)
-  "Extract task state from tool-call CONTENT details and update the task area.
-Uses the expandable block system to render the task widget.
-The server sends a :details plist with :type \"task\", :activeSummary, :tasks,
-:inProgressTaskIds, and :summary."
+  "Store the task state carried by the finished task tool call CONTENT.
+The server sends a :details plist with :type \"task\", :activeSummary,
+:tasks, :inProgressTaskIds and :summary; a failed or rejected call
+carries none.  The widget is then re-rendered from the last known state,
+dropping the placeholder or approval prompt shown for that call.  When
+the widget is asking to approve another task tool call (the server asks
+for the next call while the approved one still runs), that prompt is
+kept and the new state shows once it resolves."
   (when-let* ((details (plist-get content :details)))
-    (setq-local eca-chat--task-state details)
-    (let* ((tasks (append (plist-get details :tasks) nil)))
-      (if (null tasks)
-          ;; Task list was cleared — remove the expandable block
-          (eca-chat--remove-expandable-content eca-chat--task-block-id)
-        (let* ((active-summary (plist-get details :activeSummary))
-               (done-count (length (-filter (lambda (task) (string= "done" (plist-get task :status))) tasks)))
-               (total-count (length tasks))
-               (in-progress-task (-first (lambda (task) (string= "in-progress" (plist-get task :status))) tasks))
-               (label-text (or active-summary
-                               (when in-progress-task (plist-get in-progress-task :subject))
-                               ""))
-               (prefix-text (if active-summary "Task: " "Tasks "))
-               (progress-text (format " (%d/%d)" done-count total-count))
-               (label-face (if in-progress-task 'eca-chat-task-label-in-progress-face 'eca-chat-task-label-face))
-               (label (concat
-                       (propertize prefix-text 'font-lock-face 'eca-chat-task-prefix-face)
-                       (propertize label-text 'font-lock-face label-face)
-                       (propertize progress-text 'font-lock-face 'eca-chat-task-progress-face)))
-               (body (eca-chat--task-build-content tasks)))
-          (if (eca-chat--get-expandable-content eca-chat--task-block-id)
-              (eca-chat--update-expandable-content eca-chat--task-block-id label body)
-            (eca-chat--add-expandable-content eca-chat--task-block-id label body nil
-                                              (overlay-start (eca-chat--task-area-ov)))))))))
+    (setq-local eca-chat--task-state details))
+  (let ((approval-id (eca-chat--task-widget-approval-id)))
+    (when (or (null approval-id)
+              (equal approval-id (plist-get content :id)))
+      (eca-chat--render-task-widget))))
+
+(defun eca-chat--show-task-tool-call-approval (session content chat-id spacing-line-prefix)
+  "Ask in the task widget to approve the task tool call CONTENT.
+The task tool is rendered as the task area widget instead of a regular
+tool call block, so its approval prompt has to be shown there too,
+otherwise a chat with the task tool configured as `ask' hangs on
+\"Waiting for tool call approval\" with nothing to accept or reject
+\(editor-code-assistant/eca#584).  SESSION, CHAT-ID and
+SPACING-LINE-PREFIX build the approval prompt for the tool call id."
+  (-let* (((&plist :id id :name name :server server :arguments args :summary summary) content)
+          (label (concat (propertize (or summary (format "Calling tool: %s__%s" server name))
+                                     'font-lock-face 'eca-chat-mcp-tool-call-label-face)
+                         " " eca-chat-mcp-tool-call-pending-approval-symbol
+                         (eca-chat--build-tool-call-approval-str-content
+                          session id spacing-line-prefix chat-id))))
+    (eca-chat--set-task-widget label
+                               (eca-chat--content-table `(("Tool" . ,name)
+                                                          ("Server" . ,server)
+                                                          ("Arguments" . ,args)))
+                               id)
+    (when eca-chat-expand-pending-approval-tools
+      (eca-chat--expandable-content-toggle eca-chat--task-block-id t nil)
+      (eca-chat--ensure-prompt-visible))))
 
 (defun eca-chat--render-content (session chat-buffer role content roots &optional parent-tool-call-id chat-id)
   "Render CONTENT inside CHAT-BUFFER for SESSION.
@@ -4430,12 +4483,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
       ("toolCallPrepare"
        (if (eca-chat--task-tool-call-p content)
            (unless (eca-chat--get-expandable-content eca-chat--task-block-id)
-             (let ((label (concat
-                           (propertize "Creating tasks... " 'font-lock-face 'eca-chat-task-prefix-face)
-                           eca-chat-mcp-tool-call-loading-symbol)))
-               (eca-chat--add-expandable-content
-                eca-chat--task-block-id label "" nil
-                (overlay-start (eca-chat--task-area-ov)))))
+             (eca-chat--render-task-widget t))
          (when-let* ((id (plist-get content :id))
                      (name (plist-get content :name))
                      (server (plist-get content :server)))
@@ -4488,6 +4536,9 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                    (eca-chat--add-expandable-content
                     id label body parent-tool-call-id))))))))
       ("toolCallRun"
+       (when (and (eca-chat--task-tool-call-p content)
+                  (plist-get content :manualApproval))
+         (eca-chat--show-task-tool-call-approval session content chat-id tool-call-next-line-spacing))
        (unless (or (eca-chat--task-tool-call-p content)
                    ;; A stale run from an older history page must not
                    ;; resurrect an already-answered approval prompt (#307).
@@ -4550,6 +4601,11 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
              (eca-chat--update-parent-subagent-status
               parent-tool-call-id eca-chat-mcp-tool-call-pending-approval-symbol)))))
       ("toolCallRunning"
+       ;; Approved (possibly from another client): drop the prompt, the
+       ;; task list follows with toolCalled.
+       (when (and (eca-chat--task-tool-call-p content)
+                  (equal (plist-get content :id) (eca-chat--task-widget-approval-id)))
+         (eca-chat--render-task-widget t))
        (unless (eca-chat--task-tool-call-p content)
          (let* ((id (plist-get content :id))
                 (args (plist-get content :arguments))
@@ -4645,6 +4701,8 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
            ;; Keep parent pending while sibling approvals remain pending
            (eca-chat--restore-parent-subagent-status parent-tool-call-id))))
       ("toolCallRejected"
+       (when (eca-chat--task-tool-call-p content)
+         (eca-chat--update-task-state content))
        (unless (eca-chat--task-tool-call-p content)
          (let* ((name (plist-get content :name))
                 (server (plist-get content :server))

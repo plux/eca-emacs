@@ -2723,4 +2723,238 @@ CHOOSE receives the candidate list the command offers."
             (expect eca-chat--prompt-after-clear :to-equal "old msg"))
         (kill-buffer buf)))))
 
+(defun eca-chat-test--task-tool-call-content (type id &optional manual details)
+  "Build a task tool-call content plist of TYPE and ID.
+When MANUAL is non-nil the tool call requires manual approval.
+DETAILS is the task state details plist sent with toolCalled."
+  (append (list :type type
+                :id id
+                :name "task"
+                :server "eca"
+                :arguments (list :op "plan"
+                                 :tasks (vector (list :subject "Fix the bug"
+                                                      :description "Details")))
+                :manualApproval manual)
+          (when details (list :details details))))
+
+(defun eca-chat-test--task-details (&rest subjects)
+  "Build a task state details plist with one pending task per SUBJECTS."
+  (list :type "task"
+        :tasks (apply #'vector
+                      (seq-map-indexed (lambda (subject i)
+                                         (list :id (1+ i) :subject subject :status "pending"))
+                                       subjects))
+        :summary (list :done 0 :in-progress 0 :pending (length subjects)
+                       :total (length subjects))))
+
+(defun eca-chat-test--task-widget-text ()
+  "Return the text of the task widget label and body, or nil without one."
+  (when-let* ((ov-label (eca-chat--get-expandable-content eca-chat--task-block-id))
+              (ov-content (overlay-get ov-label 'eca-chat--expandable-content-ov-content)))
+    (buffer-substring-no-properties (overlay-start ov-label) (overlay-end ov-content))))
+
+(describe "task tool call approval"
+  ;; The task tool renders as the task area widget instead of a regular
+  ;; tool call block, so an agent configured to ask before running it
+  ;; used to hang on "Waiting for tool call approval" with nothing to
+  ;; accept or reject (editor-code-assistant/eca#584).
+  (it "shows the approval prompt with the tool arguments in the task widget"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session))
+          (eca-chat-expand-pending-approval-tools t))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallPrepare" "task-1")
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-1" t)
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be-truthy)
+            (let ((text (eca-chat-test--task-widget-text)))
+              (expect text :to-match "Calling tool: eca__task")
+              (expect text :to-match "Accept")
+              (expect text :to-match "Reject")
+              (expect text :to-match "Fix the bug"))
+            (goto-char (point-min))
+            (let ((match (text-property-search-forward
+                          'eca-tool-call-pending-approval-accept t t)))
+              (expect match :to-be-truthy)
+              (expect (get-text-property (prop-match-beginning match) 'eca-tool-call-id)
+                      :to-equal "task-1")))
+        (kill-buffer buf))))
+
+  (it "approves the real tool call id from the task widget button"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (spy-on 'eca-api-notify)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-1" t)
+             nil)
+            (goto-char (point-min))
+            (let ((match (text-property-search-forward
+                          'eca-tool-call-pending-approval-accept t t)))
+              (funcall (get-text-property (prop-match-beginning match)
+                                          'eca-button-on-action)))
+            (expect 'eca-api-notify :to-have-been-called-with
+                    session
+                    :method "chat/toolCallApprove"
+                    :params (list :chatId "chat-1" :toolCallId "task-1")))
+        (kill-buffer buf))))
+
+  (it "replaces the prompt with the task list once the call finishes"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-1" t)
+             nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRunning" "task-1")
+             nil)
+            ;; Approved (maybe from another client): no buttons while running.
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Creating tasks")
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content
+              "toolCalled" "task-1" nil (eca-chat-test--task-details "Fix the bug"))
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (let ((text (eca-chat-test--task-widget-text)))
+              (expect text :to-match "Tasks")
+              (expect text :not :to-match "Accept")))
+        (kill-buffer buf))))
+
+  (it "removes the prompt when the call is rejected and no tasks exist"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-1" t)
+             nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRejected" "task-1")
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (expect (eca-chat--get-expandable-content eca-chat--task-block-id)
+                    :to-be nil))
+        (kill-buffer buf))))
+
+  (it "restores the known task list when the call is rejected"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content
+              "toolCalled" "task-1" nil (eca-chat-test--task-details "Fix the bug"))
+             nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-2" t)
+             nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Accept")
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRejected" "task-2")
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (let ((text (eca-chat-test--task-widget-text)))
+              (expect text :to-match "Tasks")
+              (expect text :not :to-match "Accept")))
+        (kill-buffer buf))))
+
+  (it "keeps the next call's prompt when the approved call finishes late"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-1" t)
+             nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRunning" "task-1")
+             nil)
+            ;; The server asks for the next call while task-1 still runs.
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRun" "task-2" t)
+             nil)
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content
+              "toolCalled" "task-1" nil (eca-chat-test--task-details "Fix the bug"))
+             nil)
+            (expect (eca-chat--has-pending-approvals-p) :to-be-truthy)
+            (goto-char (point-min))
+            (let ((match (text-property-search-forward
+                          'eca-tool-call-pending-approval-accept t t)))
+              (expect (get-text-property (prop-match-beginning match) 'eca-tool-call-id)
+                      :to-equal "task-2"))
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallRunning" "task-2")
+             nil)
+            ;; Once task-2 is approved the state stored from task-1 shows.
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Tasks  (0/1)"))
+        (kill-buffer buf))))
+
+  (it "drops the placeholder when the call fails without task details"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content "toolCallPrepare" "task-1")
+             nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Creating tasks")
+            (eca-chat--render-content
+             session buf "assistant"
+             (plist-put (eca-chat-test--task-tool-call-content "toolCalled" "task-1")
+                        :error t)
+             nil)
+            (expect (eca-chat--get-expandable-content eca-chat--task-block-id)
+                    :to-be nil))
+        (kill-buffer buf))))
+
+  (it "keeps rendering auto-approved task calls without any prompt"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (dolist (type '("toolCallPrepare" "toolCallRun" "toolCallRunning"))
+              (eca-chat--render-content
+               session buf "assistant"
+               (eca-chat-test--task-tool-call-content type "task-1")
+               nil))
+            (expect (eca-chat--has-pending-approvals-p) :to-be nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Creating tasks")
+            (eca-chat--render-content
+             session buf "assistant"
+             (eca-chat-test--task-tool-call-content
+              "toolCalled" "task-1" nil (eca-chat-test--task-details "Fix the bug"))
+             nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Tasks  (0/1)")
+            (eca-chat--expandable-content-toggle eca-chat--task-block-id t nil)
+            (expect (eca-chat-test--task-widget-text) :to-match "Fix the bug"))
+        (kill-buffer buf)))))
+
 ;;; eca-chat-test.el ends here
