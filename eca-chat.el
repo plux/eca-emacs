@@ -46,6 +46,20 @@ For when chat went back to idle state."
   :type 'hook
   :group 'eca)
 
+(defcustom eca-chat-tool-call-functions nil
+  "Abnormal hook run when a tool call changes state in a live chat.
+Each function is called with SESSION and CONTENT, the raw tool call
+content plist whose `:type' is one of \"toolCallRun\",
+\"toolCallRunning\", \"toolCalled\" or \"toolCallRejected\".  CONTENT
+also carries `:id', `:name', `:server', `:arguments' and `:details';
+for file edits `:details' has `:type' \"fileChange\" plus `:path',
+`:diff', `:linesAdded' and `:linesRemoved'.  Functions run with the
+chat buffer current after the content was rendered, and only for live
+notifications, not when history is loaded.  Errors are demoted so they
+never break chat rendering."
+  :type 'hook
+  :group 'eca)
+
 (defvar eca-chat-session-status-changed-functions nil
   "Abnormal hook run when a session aggregated status may have changed.
 Each function is called with a single argument, the session.  It is
@@ -2797,6 +2811,15 @@ scanning the buffer on every streamed chunk."
                   "metadata" "usage"))
     (eca-chat--notify-status-changed session)))
 
+(defun eca-chat--maybe-run-tool-call-functions (session content)
+  "Run `eca-chat-tool-call-functions' when CONTENT is a tool call event.
+Only the tool-call lifecycle content types trigger the hook, so
+subscribers are not called for every chunk streamed to SESSION."
+  (when (member (plist-get content :type)
+                '("toolCallRun" "toolCallRunning" "toolCalled" "toolCallRejected"))
+    (with-demoted-errors "eca-chat-tool-call-functions: %S"
+      (run-hook-with-args 'eca-chat-tool-call-functions session content))))
+
 (defun eca-chat--chat-status-prefix ()
   "Return a status prefix string for the current chat buffer.
 Returns \"🚧 \" for pending approvals, \"⏳ \" for loading, or \"\" otherwise."
@@ -4691,7 +4714,8 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
               (save-excursion
                 (eca-chat--render-content session parent-buffer role content roots tool-call-id chat-id)
                 (eca-chat--protect-non-prompt eca-chat--last-user-message-pos)
-                (eca-chat--maybe-notify-status-changed session content)))))
+                (eca-chat--maybe-notify-status-changed session content)
+                (eca-chat--maybe-run-tool-call-functions session content)))))
       ;; Normal content
       (when-let* ((chat-buffer (eca-chat--get-chat-buffer session chat-id))
                   ((buffer-live-p chat-buffer)))
@@ -4700,7 +4724,8 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
           (save-excursion
             (eca-chat--render-content session chat-buffer role content roots)
             (eca-chat--protect-non-prompt eca-chat--last-user-message-pos)
-            (eca-chat--maybe-notify-status-changed session content)))))))
+            (eca-chat--maybe-notify-status-changed session content)
+            (eca-chat--maybe-run-tool-call-functions session content)))))))
 
 (defun eca-chat--render-history-contents (session chat-buffer contents)
   "Prepend CONTENTS above existing content in CHAT-BUFFER for SESSION.

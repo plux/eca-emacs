@@ -160,6 +160,7 @@ Chat
 - `eca-chat-parent-mode`: Set major-mode of chat parent, can be `markdown-mode`, `markdown-view-mode` or `gfm-view-mode` (default)
 - `eca-chat-mode-hook`: Hooks to run after entering `eca-chat-mode`.
 - `eca-chat-finished-hook`: Hooks to run after finishing a chat prompt.
+- `eca-chat-tool-call-functions`: Abnormal hook run with `(session content)` when a tool call changes state (`toolCallRun`, `toolCallRunning`, `toolCalled`, `toolCallRejected`). See [Magit integration](#magit-integration).
 - `eca-chat-use-side-window`: Whether the chat buffer uses a dedicated side window or a regular directional window. Ignored when `eca-chat-window-side` is `nil`.
 - `eca-chat-window-side`: Where the chat appears (`left`, `right`, `top`, or `bottom`). Set to `nil` to open a chat that is not already visible on the selected frame in the selected window without creating a split. An already visible chat on that frame stays in its existing window; dedicated and minibuffer windows cannot be reused.
 - `eca-chat-window-width`: Width of the chat window when on the left or right.
@@ -326,6 +327,32 @@ and `eca-doom-workspace-tab-running-face` faces, or disable with:
 ```elisp
 (setq eca-doom-workspace-tabs nil)
 ```
+
+### Magit integration
+
+ECA does not refresh magit or other buffers by itself, but
+`eca-chat-tool-call-functions` runs every time a tool call changes state, so
+you can decide when to refresh. This keeps a magit status buffer next to the
+chat in sync after each file edit, except while you are reading it:
+
+```elisp
+(defun my/eca-refresh-magit (_session content)
+  (let ((details (plist-get content :details)))
+    (when (and (equal (plist-get content :type) "toolCalled")
+               (equal (plist-get details :type) "fileChange")
+               (not (with-current-buffer (window-buffer)
+                      (derived-mode-p 'magit-mode))))
+      (let ((default-directory (file-name-directory (plist-get details :path))))
+        (magit-refresh-all)))))
+
+(add-hook 'eca-chat-tool-call-functions #'my/eca-refresh-magit)
+```
+
+`content` is the raw tool call plist: `:type`, `:id`, `:name`, `:server`,
+`:arguments`, `:details` and, once finished, `:outputs` and `:error`. File
+edits have `:details` with `:type` `"fileChange"`, `:path`, `:diff`,
+`:linesAdded` and `:linesRemoved`. The hook runs with the chat buffer current
+and only for live notifications, not when history is loaded.
 
 ## TRAMP / remote hosts
 

@@ -1387,7 +1387,59 @@ When MANUAL is non-nil the tool call requires manual approval."
                session (list :chatId "chat-1" :role "assistant"
                              :content (list :type "text" :text "x")))
               (expect (point) :to-equal before)))
+        (kill-buffer buf))))
+
+  (it "runs eca-chat-tool-call-functions after rendering live content"
+    (let ((buf (eca-chat-test--make-prompt-buffer "hi"))
+          (session (make-eca--session))
+          (content (list :type "toolCalled" :id "tool-1" :name "edit_file"
+                         :details (list :type "fileChange" :path "/tmp/a.el")))
+          (calls nil))
+      (unwind-protect
+          (with-current-buffer buf
+            (setq-local eca-chat--last-user-message-pos nil)
+            (spy-on 'eca-chat--get-chat-buffer :and-return-value buf)
+            (spy-on 'eca--session-workspace-folders :and-return-value nil)
+            (spy-on 'eca-chat--protect-non-prompt)
+            (spy-on 'eca-chat--render-content)
+            (let ((eca-chat-tool-call-functions
+                   (list (lambda (s c) (push (list s c (current-buffer)) calls)))))
+              (eca-chat-content-received
+               session (list :chatId "chat-1" :role "assistant" :content content))
+              (expect (spy-calls-count 'eca-chat--render-content) :to-equal 1)
+              (expect calls :to-equal (list (list session content buf)))))
         (kill-buffer buf)))))
+
+(describe "eca-chat--maybe-run-tool-call-functions"
+  (it "runs subscribers with the session and content for lifecycle events"
+    (let* ((session (make-eca--session))
+           (calls nil)
+           (eca-chat-tool-call-functions
+            (list (lambda (s c) (push (list s c) calls)))))
+      (dolist (type '("toolCallRun" "toolCallRunning" "toolCalled" "toolCallRejected"))
+        (let ((content (list :type type :id "tool-1" :name "testTool")))
+          (eca-chat--maybe-run-tool-call-functions session content)
+          (expect (car calls) :to-equal (list session content))))
+      (expect (length calls) :to-equal 4)))
+
+  (it "ignores content that is not a tool call event"
+    (let* ((session (make-eca--session))
+           (count 0)
+           (eca-chat-tool-call-functions
+            (list (lambda (_s _c) (cl-incf count)))))
+      (dolist (type '("text" "reasoning" "toolCallPrepare" "progress" "usage" "metadata"))
+        (eca-chat--maybe-run-tool-call-functions session (list :type type)))
+      (expect count :to-equal 0)))
+
+  (it "demotes errors raised by subscribers"
+    (let* ((session (make-eca--session))
+           (debug-on-error nil)
+           (inhibit-message t)
+           (eca-chat-tool-call-functions
+            (list (lambda (_s _c) (error "boom")))))
+      (expect (eca-chat--maybe-run-tool-call-functions
+               session '(:type "toolCalled" :id "tool-1"))
+              :not :to-throw))))
 
 (describe "eca-chat--transient-segment-loading"
   (it "shows the stop button while a question is pending even when idle"
