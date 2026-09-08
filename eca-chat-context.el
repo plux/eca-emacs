@@ -488,7 +488,9 @@ DATA is the binary image data as a string."
     (seq-some (lambda (type)
                 (and (symbolp type)
                      (string-match-p "^image/" (symbol-name type))))
-              (if (vectorp targets) (append targets nil) targets))))
+              (cond ((vectorp targets) (append targets nil))
+                     ((symbolp targets) (list targets))
+                     (t targets)))))
 
 (defun eca-chat--yank-considering-image (orig-fun &rest args)
   "Around advice for paste commands to use `yank-media' for images.
