@@ -233,6 +233,33 @@ When MANUAL is non-nil the tool call requires manual approval."
             (expect (overlay-get (eca-chat--get-expandable-content "parent-1")
                                  'eca-chat--tool-call-status)
                     :to-equal eca-chat-mcp-tool-call-loading-symbol))
+        (kill-buffer buf))))
+
+  (it "shows the subagent variant row when details carry one"
+    (let ((buf (eca-chat-test--make-render-buffer)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--tool-call-subagent-details
+             "sub-1" (list :agent "test-agent" :task "task")
+             "Calling subagent" nil nil
+             eca-chat-mcp-tool-call-loading-symbol nil
+             (list :type "subagent" :model "test-model" :variant "high"))
+            (eca-chat--expandable-content-toggle "sub-1" t nil)
+            (expect (buffer-string) :to-match "Variant")
+            (expect (buffer-string) :to-match "high"))
+        (kill-buffer buf))))
+
+  (it "omits the subagent variant row when details have none"
+    (let ((buf (eca-chat-test--make-render-buffer)))
+      (unwind-protect
+          (eca-chat--with-current-buffer buf
+            (eca-chat--tool-call-subagent-details
+             "sub-2" (list :agent "test-agent" :task "task")
+             "Calling subagent" nil nil
+             eca-chat-mcp-tool-call-loading-symbol nil
+             (list :type "subagent" :model "test-model"))
+            (eca-chat--expandable-content-toggle "sub-2" t nil)
+            (expect (buffer-string) :not :to-match "Variant"))
         (kill-buffer buf)))))
 
 (describe "eca-chat--apply-markdown-markup-visibility"

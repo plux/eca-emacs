@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show the model variant of a running subagent in the `spawn_agent` tool call details table when the server sends one.
 - Bugfix: kill commands not covered by the deletion guards (`backward-kill-sentence`, `backward-kill-sexp`, `kill-line`, `kill-region`, etc.) could cross the prompt/context markup and corrupt the chat prompt area, making RET fail with `args-out-of-range` (#305). Kills are now clamped to the prompt field (and blocked above it), the transient-area refresh skips instead of signaling on a corrupted block, and `eca-chat-clear-prompt` (`C-c C-d`) rebuilds the prompt markup when it is broken.
 
 - Perf: cache the pending tool call approval status instead of rescanning the whole chat buffer on every mode-line/tab-line/header-line redisplay, which made Emacs sluggish on long chats (#307).
