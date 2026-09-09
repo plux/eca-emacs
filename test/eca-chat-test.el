@@ -2462,7 +2462,27 @@ is taller than the batch-mode test window."
     (expect (lookup-key eca-chat-mode-map (kbd "S-<return>"))
             :to-be #'eca-chat--key-pressed-newline)
     (expect (lookup-key eca-chat-mode-map (kbd "C-<return>"))
-            :to-be #'eca-chat--key-pressed-queue)))
+            :to-be #'eca-chat--key-pressed-queue))
+
+  ;; Under evil, state bindings beat the mode map and `eca-chat-mode-map'
+  ;; inherits the ones evil-collection sets on `markdown-mode-map', so RET
+  ;; in normal state ran `markdown-do', which inserts a GFM checkbox when
+  ;; point is not on a link (e.g. next to a question option).  Remapping
+  ;; catches it whichever keymap resolved RET; evil is not available in
+  ;; CI, so the state map is simulated with an emulation map.
+  (it "remaps markdown-do to eca-chat--key-pressed-return"
+    (expect (lookup-key eca-chat-mode-map [remap markdown-do])
+            :to-be #'eca-chat--key-pressed-return))
+
+  (it "redirects RET bound to markdown-do by a higher precedence keymap"
+    (with-temp-buffer
+      (use-local-map eca-chat-mode-map)
+      (let* ((state-map (make-sparse-keymap))
+             (emulation-mode-map-alists
+              (cons (list (cons t state-map)) emulation-mode-map-alists)))
+        (define-key state-map (kbd "RET") #'markdown-do)
+        (expect (key-binding (kbd "RET") nil t) :to-be #'markdown-do)
+        (expect (key-binding (kbd "RET")) :to-be #'eca-chat--key-pressed-return)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Expandable block label keymap

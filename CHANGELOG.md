@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bugfix: under evil (e.g. Doom), RET in normal state in chat buffers ran `markdown-do` from evil-collection's `markdown-mode-map` bindings, which `eca-chat-mode-map` inherits. It followed links but inserted a GFM checkbox (`* [ ]`) anywhere else, e.g. next to a question option. RET in normal state now goes through `eca-chat--key-pressed-return`.
 - Bugfix: a tool call awaiting approval whose expanded body is taller than the window no longer gets its label and Accept/Reject buttons scrolled above the window (#308). The window is anchored on the tool call with point on its Accept button (RET accepts), and once it resolves the view moves on to the next pending approval or back to the prompt.
 - Add `eca-chat-tool-call-functions`, an abnormal hook run with the session and content when a tool call changes state, e.g. to refresh magit after file edits.
 - Bugfix: a `task` tool call that requires approval (e.g. a custom agent with `tools.byDefault: ask` whose allow list lacks `eca__task`) left the chat stuck on "Waiting for tool call approval" with nothing to accept or reject, since the task tool renders as the task widget instead of a tool call block (editor-code-assistant/eca#584). The approval prompt with the tool arguments is now shown in the task widget, and the widget no longer keeps a stale "Creating tasks..." placeholder when the call fails or is rejected.

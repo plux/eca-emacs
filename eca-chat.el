@@ -951,6 +951,12 @@ and resume link are not left behind under the replayed messages.")
     (define-key map (kbd "C-<up>") #'eca-chat--key-pressed-previous-prompt-history)
     (define-key map (kbd "C-<down>") #'eca-chat--key-pressed-next-prompt-history)
     (define-key map (kbd "RET") #'eca-chat--key-pressed-return)
+    ;; evil-collection (and Spacemacs) bind RET to `markdown-do' in normal
+    ;; state on `markdown-mode-map', which this map inherits and evil
+    ;; ranks above it.  `markdown-do' follows links but inserts a GFM
+    ;; checkbox anywhere else, e.g. next to a question option.  Remap it
+    ;; so RET ends in the chat handler whichever keymap resolved it.
+    (define-key map [remap markdown-do] #'eca-chat--key-pressed-return)
     (define-key map (kbd "C-c C-<return>") #'eca-chat-send-prompt-at-chat)
     ;; Bind only TAB, never the raw <tab> function-key event: binding
     ;; <tab> would block Emacs's <tab> -> TAB key translation in GUI
