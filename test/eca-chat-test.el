@@ -286,7 +286,18 @@ When TITLE is non-nil, use it as the chat title."
               (expect (length (eca-chat--tab-line-tabs)) :to-equal 1)))
         (dolist (buffer (list a b))
           (when (buffer-live-p buffer)
-            (kill-buffer buffer))))))
+            (kill-buffer buffer)))
+        ;; `eca-chat-opened' activates a real `eca-chat-mode' buffer,
+        ;; which installs global command advices.  Remove them so later
+        ;; specs see raw editing commands.
+        (dolist (fn '(delete-char delete-backward-char
+                      backward-delete-char
+                      backward-delete-char-untabify
+                      backward-kill-word))
+          (advice-remove fn #'eca-chat--key-pressed-deletion))
+        (dolist (fn eca-chat--kill-guarded-commands)
+          (advice-remove fn #'eca-chat--key-pressed-kill))
+        (advice-remove 'yank #'eca-chat--yank-considering-image))))
 
   (it "clears the cached tab list on chat exit"
     (let ((session (make-eca--session)) chat)
