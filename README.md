@@ -226,6 +226,7 @@ Settings
 Doom Emacs
 
 - `eca-doom-workspace-tabs`: Whether to decorate the Doom workspace tabline with the ECA session status of each workspace (default `t`).
+- `eca-doom-stop-session-on-workspace-kill`: Whether killing a Doom workspace also stops the ECA session related to it, when no other workspace refers to that session (default `t`).
 
 MCP
 
@@ -316,16 +317,28 @@ accuracy and transcription speed.
 
 Calling `M-x eca` with prefix `C-u` will ask for what workspaces to start the process.
 
-### Doom Emacs workspace tabs
+### Doom Emacs workspaces
 
-On Doom Emacs with the `:ui workspaces` module, the workspace tabline is
-colored with the ECA session status of each workspace: orange when a chat
-waits on you (pending approval or question), dim yellow while a chat is
-running. Customize the colors via the `eca-doom-workspace-tab-attention-face`
-and `eca-doom-workspace-tab-running-face` faces, or disable with:
+On Doom Emacs, chat buffers are "real" buffers: they show up in the workspace
+buffer list and Doom never swaps them for the fallback buffer (e.g. when a
+workspace is killed and the previous one, showing a chat, is restored).
+
+With the `:ui workspaces` module, the workspace tabline is colored with the
+ECA session status of each workspace: orange when a chat waits on you (pending
+approval or question), dim yellow while a chat is running. Customize the
+colors via the `eca-doom-workspace-tab-attention-face` and
+`eca-doom-workspace-tab-running-face` faces, or disable with:
 
 ```elisp
 (setq eca-doom-workspace-tabs nil)
+```
+
+Killing a workspace (`SPC TAB d`) also stops the ECA session related to it,
+unless another workspace still refers to that session. Its chats remain
+resumable server-side. Disable with:
+
+```elisp
+(setq eca-doom-stop-session-on-workspace-kill nil)
 ```
 
 ### Magit integration
