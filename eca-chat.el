@@ -15,6 +15,7 @@
 (require 'find-func)
 (require 'markdown-mode)
 (require 'compat)
+(require 'text-property-search)
 
 (require 'eca-util)
 (require 'eca-api)
@@ -422,12 +423,6 @@ rescanned.")
 (defun eca-chat--invalidate-pending-approvals-cache ()
   "Mark the pending approvals cache of the current buffer stale."
   (setq-local eca-chat--pending-approvals-cache 'dirty))
-
-(defvar-local eca-chat--focused-approval-id nil
-  "Id of the tool call whose approval the window is anchored on.
-Set by `eca-chat--ensure-tool-call-approval-visible' when it moves
-point onto the Accept button of a tool call too tall to fit above
-the prompt, and cleared once that tool call is resolved.")
 
 (defcustom eca-chat-tool-call-approval-content-size 0.9
   "The size of font of tool call approval."
@@ -1734,7 +1729,6 @@ Recovery path for a corrupted prompt block (see #305)."
     (remove-overlays (point-min) (point-max)))
   (eca-chat--invalidate-overlay-caches)
   (eca-chat--invalidate-pending-approvals-cache)
-  (setq-local eca-chat--focused-approval-id nil)
   (eca-chat-expandable--reset-id-table)
   (setq-local eca-chat--task-state nil)
   ;; Cancel loading-related timers and reset state
@@ -2063,6 +2057,29 @@ the progress/context/prompt still works.  No-op when
             (put-text-property (point-min) (1+ (point-min))
                                'front-sticky '(read-only))))))))
 
+(defvar eca-chat--keep-point nil
+  "Non-nil once a render moved point on purpose, so it is not restored.
+Bound by `eca-chat--with-point-preserved' and set by the scroll
+helpers when they move point to the prompt or onto an approval
+button.")
+
+(defmacro eca-chat--with-point-preserved (&rest body)
+  "Run BODY, restoring point afterwards unless BODY moved it on purpose.
+Rendering inserts text wherever the content goes, dragging point
+along, and streaming must not move the cursor.  Helpers that move
+point deliberately set `eca-chat--keep-point' to keep the new
+position: a plain `save-excursion' would undo it whenever the chat
+window is the selected one."
+  (declare (indent 0) (debug t))
+  (let ((saved (gensym "saved-point-")))
+    `(let ((eca-chat--keep-point nil)
+           (,saved (point-marker)))
+       (unwind-protect (progn ,@body)
+         (when (and (not eca-chat--keep-point)
+                    (eq (marker-buffer ,saved) (current-buffer)))
+           (goto-char ,saved))
+         (set-marker ,saved nil)))))
+
 (defun eca-chat--viewing-bottom-p (win)
   "Return non-nil when the prompt separator is displayed in WIN.
 That means the user is viewing the bottom of the chat, so it is
@@ -2075,15 +2092,19 @@ content, scrolling must be suppressed so the view does not jump."
   "Scroll the chat window so the prompt area stays visible.
 Only acts when the user is currently viewing the bottom of the
 buffer, see `eca-chat--viewing-bottom-p'.  When FORCE is non-nil,
-scroll unconditionally: used right after sending a prompt, when a
-long user message may already have pushed the prompt below the
-window end, making the guard always fail."
+scroll unconditionally and keep point at the prompt past
+`eca-chat--with-point-preserved': used right after sending a
+prompt, when a long user message may already have pushed the
+prompt below the window end, making the guard always fail, and to
+resume following the chat after acting on a tool call approval."
   (when-let* ((win (get-buffer-window (current-buffer))))
     (when (and (eca-chat--prompt-area-start-point)
                (or force (eca-chat--viewing-bottom-p win)))
       (with-selected-window win
         (goto-char (point-max))
-        (recenter -1)))))
+        (recenter -1))
+      (when force
+        (setq eca-chat--keep-point t)))))
 
 (defun eca-chat--tool-call-accept-button-pos (id)
   "Return the position of the Accept button in tool call ID's label.
@@ -2115,9 +2136,8 @@ above it.  A block taller than the window would instead push its
 label and Accept/Reject buttons above the window (#308), so anchor
 the window at the label and move point onto the Accept button:
 with the prompt off-screen, leaving point there would make
-redisplay scroll right back to it.  The id is remembered in
-`eca-chat--focused-approval-id' so `eca-chat--release-approval-focus'
-can move on once the tool call resolves."
+redisplay scroll right back to it.  Once the tool call resolves,
+`eca-chat--move-on-from-approval' brings point back."
   (when-let* ((win (get-buffer-window (current-buffer)))
               (ov-label (eca-chat--get-expandable-content id))
               (label-start (save-excursion
@@ -2129,26 +2149,30 @@ can move on once the tool call resolves."
       (when (< label-start (window-start win))
         (set-window-start win label-start)
         (goto-char (or (eca-chat--tool-call-accept-button-pos id) label-start))
-        (setq-local eca-chat--focused-approval-id id)))))
+        (setq eca-chat--keep-point t)))))
 
-(defun eca-chat--release-approval-focus (id)
-  "Move on from tool call ID once its approval is resolved.
-No-op unless ID is `eca-chat--focused-approval-id' and point is
-still within its block, meaning the user acted on it from where
-`eca-chat--ensure-tool-call-approval-visible' left point.  Then
-anchor on the next tool call awaiting approval, or bring the
-prompt back into view when none is left, so rejecting to tell ECA
-what to do differently lands at the prompt."
-  (when (equal id eca-chat--focused-approval-id)
-    (setq-local eca-chat--focused-approval-id nil)
-    (when-let* ((win (get-buffer-window (current-buffer)))
-                (ov-label (eca-chat--get-expandable-content id))
-                (ov-content (overlay-get ov-label 'eca-chat--expandable-content-ov-content))
-                (pos (window-point win)))
-      (when (<= (overlay-start ov-label) pos (overlay-end ov-content))
-        (if-let* ((next-id (eca-chat--first-pending-approval-id)))
-            (eca-chat--ensure-tool-call-approval-visible next-id)
-          (eca-chat--ensure-prompt-visible t))))))
+(defun eca-chat--approval-acted-on-p (id)
+  "Return non-nil when point is within tool call ID's block awaiting approval.
+Point lands there when the user clicks or hits RET on a button, or
+when `eca-chat--ensure-tool-call-approval-visible' anchored the
+window on the block.  Must be checked before the block is
+re-rendered without its buttons."
+  (when-let* ((win (get-buffer-window (current-buffer)))
+              (ov-label (eca-chat--get-expandable-content id))
+              (ov-content (overlay-get ov-label 'eca-chat--expandable-content-ov-content)))
+    (and (eca-chat--tool-call-accept-button-pos id)
+         (<= (overlay-start ov-label) (window-point win) (overlay-end ov-content)))))
+
+(defun eca-chat--move-on-from-approval ()
+  "Leave the block of a resolved approval the user acted on.
+Anchor on the next tool call awaiting approval, or bring the prompt
+back into view when none is left, so the chat is followed again
+after accepting and rejecting to tell ECA what to do differently
+lands at the prompt."
+  (if-let* ((next-id (eca-chat--first-pending-approval-id)))
+      (eca-chat--ensure-tool-call-approval-visible next-id)
+    (eca-chat--ensure-prompt-visible t))
+  (setq eca-chat--keep-point t))
 
 (defun eca-chat--new-context-start-point ()
   "Return the metadata overlay for the new context area start point."
@@ -4359,7 +4383,12 @@ approval requests.  Falls back to the buffer-local `eca-chat--id'.
 Must be called with `eca-chat--with-current-buffer' or equivalent."
   (let* ((content-id (plist-get content :contentId))
          (content-type (plist-get content :type))
-         (tool-call-next-line-spacing (make-string (1+ (length eca-chat-expandable-block-open-symbol)) ?\s)))
+         (tool-call-next-line-spacing (make-string (1+ (length eca-chat-expandable-block-open-symbol)) ?\s))
+         ;; Whether the user acted on this approval from within its
+         ;; block; checked now, before rendering drops the buttons.
+         (approval-acted-on? (and (member content-type '("toolCallRunning" "toolCalled"
+                                                          "toolCallRejected"))
+                                  (eca-chat--approval-acted-on-p (plist-get content :id)))))
     ;; Tool call lifecycle events are the only content that adds or
     ;; removes approval buttons; drop the cached scan result so the
     ;; next status check rescans the buffer.
@@ -4645,7 +4674,6 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                     ("Arguments" . ,args)))
                  nil
                  parent-tool-call-id)))
-           (eca-chat--release-approval-focus id)
            (eca-chat--mark-tool-call-approval-resolved id)
            ;; Keep parent pending while sibling approvals remain pending
            (eca-chat--restore-parent-subagent-status parent-tool-call-id))))
@@ -4702,7 +4730,6 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
            (when eca-chat-shrink-called-tools
              (eca-chat--expandable-content-toggle id t t)
              (eca-chat--ensure-prompt-visible))
-           (eca-chat--release-approval-focus id)
            (eca-chat--mark-tool-call-approval-resolved id)
            ;; Keep parent pending while sibling approvals remain pending
            (eca-chat--restore-parent-subagent-status parent-tool-call-id))))
@@ -4743,7 +4770,6 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                                             ("Arguments" . ,args)))
                  nil
                  parent-tool-call-id)))
-           (eca-chat--release-approval-focus id)
            (eca-chat--mark-tool-call-approval-resolved id)
            ;; Keep parent pending while sibling approvals remain pending
            (eca-chat--restore-parent-subagent-status parent-tool-call-id))))
@@ -4844,6 +4870,8 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
            (setq-local eca-chat--context-breakdown     (plist-get content :contextBreakdown)))
          (force-mode-line-update)))
       (_ nil))
+    (when approval-acted-on?
+      (eca-chat--move-on-from-approval))
     (eca-chat--mark-response-copy-break
      content-type parent-tool-call-id)))
 
@@ -4863,7 +4891,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
           (eca-chat--with-current-buffer parent-buffer
             (when-let* ((tool-call-id (gethash chat-id eca-chat--subagent-chat-id->tool-call-id)))
               ;; Preserve the user's point: streaming must not move the cursor.
-              (save-excursion
+              (eca-chat--with-point-preserved
                 (eca-chat--render-content session parent-buffer role content roots tool-call-id chat-id)
                 (eca-chat--protect-non-prompt eca-chat--last-user-message-pos)
                 (eca-chat--maybe-notify-status-changed session content)
@@ -4873,7 +4901,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                   ((buffer-live-p chat-buffer)))
         (eca-chat--with-current-buffer chat-buffer
           ;; Preserve the user's point: streaming must not move the cursor.
-          (save-excursion
+          (eca-chat--with-point-preserved
             (eca-chat--render-content session chat-buffer role content roots)
             (eca-chat--protect-non-prompt eca-chat--last-user-message-pos)
             (eca-chat--maybe-notify-status-changed session content)

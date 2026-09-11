@@ -287,6 +287,31 @@ is taller than the batch-mode test window."
   (and (get-text-property (point) 'eca-tool-call-pending-approval-accept)
        (equal id (get-text-property (point) 'eca-tool-call-id))))
 
+(defun eca-chat-test--receive (session buf content)
+  "Deliver CONTENT for SESSION to BUF like the server notification does.
+Goes through `eca-chat-content-received' so the point preservation
+around rendering applies, as when the chat window is selected."
+  (spy-on 'eca-chat--get-chat-buffer :and-return-value buf)
+  (spy-on 'eca--session-workspace-folders :and-return-value nil)
+  (eca-chat-content-received
+   session (list :chatId "chat-1" :role "assistant" :content content)))
+
+(describe "eca-chat--with-point-preserved"
+  (it "restores point moved by the body"
+    (with-temp-buffer
+      (insert "abc")
+      (eca-chat--with-point-preserved
+        (goto-char (point-min)))
+      (expect (point) :to-equal (point-max))))
+
+  (it "keeps point when the body moved it on purpose"
+    (with-temp-buffer
+      (insert "abc")
+      (eca-chat--with-point-preserved
+        (goto-char (point-min))
+        (setq eca-chat--keep-point t))
+      (expect (point) :to-equal (point-min)))))
+
 (describe "eca-chat--ensure-tool-call-approval-visible"
   ;; Issue #308: a tool call awaiting approval whose expanded body is
   ;; taller than the window must keep its label and buttons in view
@@ -298,13 +323,10 @@ is taller than the batch-mode test window."
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (eca-chat--with-current-buffer buf
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-approval-content "tool-1")
-               nil)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-approval-content "tool-1"))
               (expect (window-start) :to-equal (eca-chat-test--label-start "tool-1"))
-              (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)
-              (expect eca-chat--focused-approval-id :to-equal "tool-1")))
+              (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)))
         (kill-buffer buf))))
 
   (it "keeps the prompt at the bottom when the block fits in the window"
@@ -314,14 +336,11 @@ is taller than the batch-mode test window."
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (eca-chat--with-current-buffer buf
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-approval-content "tool-1" 3)
-               nil)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-approval-content "tool-1" 3))
               (expect (point) :to-equal (point-max))
               (expect (window-start) :not :to-be-greater-than
-                      (eca-chat-test--label-start "tool-1"))
-              (expect eca-chat--focused-approval-id :to-be nil)))
+                      (eca-chat-test--label-start "tool-1"))))
         (kill-buffer buf))))
 
   (it "does not scroll when the user is reading earlier content"
@@ -338,8 +357,7 @@ is taller than the batch-mode test window."
                (eca-chat-test--tall-approval-content "tool-1")
                nil)
               (expect 'eca-chat--ensure-tool-call-approval-visible
-                      :not :to-have-been-called)
-              (expect eca-chat--focused-approval-id :to-be nil)))
+                      :not :to-have-been-called)))
         (kill-buffer buf))))
 
   (it "decides whether the user is at the bottom before expanding the block"
@@ -363,27 +381,25 @@ is taller than the batch-mode test window."
                (eca-chat-test--tall-approval-content "tool-1")
                nil)
               (expect 'eca-chat--viewing-bottom-p :to-have-been-called)
-              (expect eca-chat--focused-approval-id :to-equal "tool-1")))
+              (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)))
         (kill-buffer buf)))))
 
-(describe "eca-chat--release-approval-focus"
-  (it "returns to the prompt when the focused tool call is rejected"
+(describe "eca-chat--move-on-from-approval"
+  ;; Acting on an approval leaves point inside the tool call block
+  ;; (mouse click, RET, or the anchoring above), which turns off
+  ;; following the chat, so resolving it must bring point back.
+  (it "returns to the prompt when the anchored approval is rejected"
     (let ((buf (eca-chat-test--make-render-buffer))
           (session (make-eca--session)))
       (unwind-protect
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (eca-chat--with-current-buffer buf
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-approval-content "tool-1")
-               nil)
-              (expect eca-chat--focused-approval-id :to-equal "tool-1")
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-tool-call-content "toolCallRejected" "tool-1")
-               nil)
-              (expect eca-chat--focused-approval-id :to-be nil)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-approval-content "tool-1"))
+              (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-tool-call-content "toolCallRejected" "tool-1"))
               (expect (point) :to-equal (point-max))
               ;; The block stays expanded, so showing the prompt again
               ;; means scrolling past its label.
@@ -391,7 +407,24 @@ is taller than the batch-mode test window."
                       (eca-chat-test--label-start "tool-1"))))
         (kill-buffer buf))))
 
-  (it "anchors on the next pending approval when the focused one runs"
+  (it "returns to the prompt after accepting with the mouse on a block that fits"
+    (let ((buf (eca-chat-test--make-render-buffer))
+          (session (make-eca--session)))
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (eca-chat--with-current-buffer buf
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-approval-content "tool-1" 3))
+              (expect (point) :to-equal (point-max))
+              ;; A mouse click moves point onto the button before running it.
+              (goto-char (eca-chat--tool-call-accept-button-pos "tool-1"))
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tool-call-content "toolCallRunning" "tool-1"))
+              (expect (point) :to-equal (point-max))))
+        (kill-buffer buf))))
+
+  (it "anchors on the next pending approval when the acted-on one runs"
     (let ((buf (eca-chat-test--make-render-buffer))
           (session (make-eca--session)))
       (unwind-protect
@@ -409,54 +442,43 @@ is taller than the batch-mode test window."
                nil)
               (set-window-buffer (selected-window) buf)
               (eca-chat--ensure-tool-call-approval-visible "tool-1")
-              (expect eca-chat--focused-approval-id :to-equal "tool-1")
               (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tool-call-content "toolCallRunning" "tool-1")
-               nil)
-              (expect eca-chat--focused-approval-id :to-equal "tool-2")
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tool-call-content "toolCallRunning" "tool-1"))
               (expect (window-start) :to-equal (eca-chat-test--label-start "tool-2"))
               (expect (eca-chat-test--on-accept-button-p "tool-2") :to-be-truthy)))
         (kill-buffer buf))))
 
-  (it "leaves point alone when the user moved away from the focused block"
+  (it "leaves point alone when the user is reading elsewhere"
     (let ((buf (eca-chat-test--make-render-buffer))
           (session (make-eca--session)))
       (unwind-protect
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (eca-chat--with-current-buffer buf
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-approval-content "tool-1")
-               nil)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-approval-content "tool-1"))
               (goto-char (point-min))
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tool-call-content "toolCallRunning" "tool-1")
-               nil)
-              (expect eca-chat--focused-approval-id :to-be nil)
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tool-call-content "toolCallRunning" "tool-1"))
               (expect (point) :to-equal (point-min))))
         (kill-buffer buf))))
 
-  (it "ignores tool calls other than the focused one"
+  (it "leaves point alone inside a tool call that needed no approval"
     (let ((buf (eca-chat-test--make-render-buffer))
           (session (make-eca--session)))
       (unwind-protect
           (save-window-excursion
             (set-window-buffer (selected-window) buf)
             (eca-chat--with-current-buffer buf
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tall-approval-content "tool-1")
-               nil)
-              (eca-chat--render-content
-               session buf "assistant"
-               (eca-chat-test--tool-call-content "toolCallRunning" "tool-other")
-               nil)
-              (expect eca-chat--focused-approval-id :to-equal "tool-1")
-              (expect (eca-chat-test--on-accept-button-p "tool-1") :to-be-truthy)))
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-tool-call-content "toolCallRunning" "tool-1"))
+              ;; The user expands the running tool call to peek at it.
+              (eca-chat--expandable-content-toggle "tool-1" t nil)
+              (goto-char (eca-chat-test--label-start "tool-1"))
+              (eca-chat-test--receive
+               session buf (eca-chat-test--tall-tool-call-content "toolCalled" "tool-1"))
+              (expect (point) :to-equal (eca-chat-test--label-start "tool-1"))))
         (kill-buffer buf)))))
 
 (describe "eca-chat--apply-markdown-markup-visibility"
